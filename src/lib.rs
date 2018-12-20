@@ -1,11 +1,14 @@
 #![feature(pin, arbitrary_self_types, futures_api)]
 use std::cell::UnsafeCell;
 use std::future::Future;
-use std::mem::{transmute, forget};
+use std::mem::{forget, transmute};
 use std::pin::Pin;
 use std::ptr::NonNull;
-use std::sync::{Arc, atomic::{AtomicUsize, Ordering::SeqCst}};
-use std::task::{Poll, LocalWaker, Waker, UnsafeWake};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering::SeqCst},
+    Arc,
+};
+use std::task::{LocalWaker, Poll, UnsafeWake, Waker};
 use std::thread;
 
 use crossbeam::channel;
@@ -26,14 +29,16 @@ lazy_static::lazy_static! {
     };
 }
 
-pub fn spawn<F>(future: F) where F: Future<Output = ()> + Send + 'static {
-    let vtable = unsafe {
-        transmute::<&(dyn Future<Output = ()> + Send + 'static), Obj>(&future).vtable
-    };
+pub fn spawn<F>(future: F)
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    let vtable =
+        unsafe { transmute::<&(dyn Future<Output = ()> + Send + 'static), Obj>(&future).vtable };
     let future: Arc<AtomicFuture<F>> = Arc::new(AtomicFuture {
         status: AtomicUsize::new(WAITING),
         vtable: vtable,
-        future: UnsafeCell::new(future)
+        future: UnsafeCell::new(future),
     });
     let future: *const AtomicFuture = Arc::into_raw(future) as *const AtomicFuture;
     let task = unsafe { task(future) };
@@ -56,15 +61,19 @@ struct AtomicFuture<F: ?Sized = ()> {
     future: UnsafeCell<F>,
 }
 
-#[repr(C)] struct Obj { data: *mut (), vtable: *const () }
+#[repr(C)]
+struct Obj {
+    data: *mut (),
+    vtable: *const (),
+}
 
-unsafe impl Send for AtomicFuture { }
-unsafe impl Sync for AtomicFuture { }
+unsafe impl Send for AtomicFuture {}
+unsafe impl Sync for AtomicFuture {}
 
-const WAITING: usize = 0;       // --> POLLING
-const POLLING: usize = 1;       // --> WAITING, REPOLL, or COMPLETE
-const REPOLL: usize = 2;        // --> POLLING
-const COMPLETE: usize = 3;      // No transitions out
+const WAITING: usize = 0; // --> POLLING
+const POLLING: usize = 1; // --> WAITING, REPOLL, or COMPLETE
+const REPOLL: usize = 2; // --> POLLING
+const COMPLETE: usize = 3; // No transitions out
 
 impl Task {
     unsafe fn poll(self) {
@@ -80,9 +89,13 @@ impl Task {
             if let Poll::Ready(_) = future.as_mut().poll(&waker) {
                 break self.0.status.store(COMPLETE, SeqCst);
             }
-            match self.0.status.compare_exchange(POLLING, WAITING, SeqCst, SeqCst) {
-                Ok(_)   => break,
-                Err(_)  => self.0.status.store(POLLING, SeqCst),
+            match self
+                .0
+                .status
+                .compare_exchange(POLLING, WAITING, SeqCst, SeqCst)
+            {
+                Ok(_) => break,
+                Err(_) => self.0.status.store(POLLING, SeqCst),
             }
         }
         forget(waker)
@@ -95,15 +108,19 @@ unsafe impl UnsafeWake for AtomicFuture {
         loop {
             match status {
                 WAITING => {
-                    match self.status.compare_exchange(WAITING, POLLING, SeqCst, SeqCst) {
-                        Ok(_) => {
-                            return QUEUE.tx.send(clone_task(self)).unwrap()
-                        }
+                    match self
+                        .status
+                        .compare_exchange(WAITING, POLLING, SeqCst, SeqCst)
+                    {
+                        Ok(_) => return QUEUE.tx.send(clone_task(self)).unwrap(),
                         Err(cur) => status = cur,
                     }
                 }
                 POLLING => {
-                    if let Err(cur) = self.status.compare_exchange(POLLING, REPOLL, SeqCst, SeqCst) {
+                    if let Err(cur) = self
+                        .status
+                        .compare_exchange(POLLING, REPOLL, SeqCst, SeqCst)
+                    {
                         status = cur;
                     }
                 }
@@ -113,7 +130,9 @@ unsafe impl UnsafeWake for AtomicFuture {
     }
 
     unsafe fn clone_raw(&self) -> Waker {
-        Waker::new(NonNull::new_unchecked(Arc::into_raw(clone_task(self).0) as *mut AtomicFuture))
+        Waker::new(NonNull::new_unchecked(
+            Arc::into_raw(clone_task(self).0) as *mut AtomicFuture
+        ))
     }
 
     unsafe fn drop_raw(&self) {
